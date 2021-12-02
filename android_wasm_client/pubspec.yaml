@@ -29,6 +29,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  wasm:
+    git:
+      url: https://github.com/dart-lang/wasm.git
+      path: wasm
+      ref: update # change to `main` when dart-lang/wasm#68 is merged
 
 
   # The following adds the Cupertino Icons font to your application.
