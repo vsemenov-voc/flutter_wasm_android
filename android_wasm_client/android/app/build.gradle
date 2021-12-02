@@ -1,3 +1,5 @@
+import org.gradle.nativeplatform.platform.internal.DefaultNativePlatform
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
@@ -55,6 +57,92 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig signingConfigs.debug
+        }
+    }
+
+    def thisDir = file('.')
+    def hostOs = DefaultNativePlatform.currentOperatingSystem.getName().toLowerCase()
+    if (hostOs.startsWith('mac')) {
+      hostOs = 'darwin'
+    }
+    if (hostOs.startsWith('windows')) {
+      hostOs = 'windows'
+    }
+    def hostArch = DefaultNativePlatform.currentArchitecture.getName().replaceAll('-', '_')
+    def ndkBinDir = "${android.ndkDirectory}/toolchains/llvm/prebuilt/${hostOs}-${hostArch}/bin"
+    def projectProperties = new Properties()
+    projectProperties.load(project.rootProject.file('local.properties').newDataInputStream())
+    def flutterDir = projectProperties.getProperty('flutter.sdk')
+    def platformVersion = -1
+    fileTree("${android.ndkDirectory}/platforms").visit { FileVisitDetails details ->
+        if (details.isDirectory() && details.name.startsWith("android-")) {
+            platformVersion = Math.max(platformVersion, details.name.substring(8) as int)
+        }
+    }
+    if (platformVersion < 0) {
+        throw new Exception("Can't find any valid platforms in ${android.ndkDirectory}/platforms")
+    }
+
+    tasks.register('wasm-pub-get') {
+        doLast {
+            exec {
+                workingDir '..'
+                commandLine "${flutterDir}/bin/flutter", 'pub', 'get'
+            }
+        }
+    }
+
+    def architectures = [
+            ['arm64-v8a', 'aarch64-linux-android', 'aarch64-linux-android', 'aarch64-linux-android', 'arch-arm64'],
+            ['x86', 'i686-linux-android', 'i686-linux-android', 'i686-linux-android', 'arch-x86'],
+
+            // TODO(#53,#54): Enable these when they're supported by Wasmer.
+            // ['armeabi-v7a', 'armv7a-linux-androideabi', 'arm-linux-androideabi', 'armv7-linux-androideabi', 'arch-arm'],
+            // ['x86_64', 'x86_64-linux-android', 'x86_64-linux-android', 'x86_64-linux-android', 'arch-x86_64'],
+    ]
+    for (arch in architectures) {
+        def abi = arch[0]
+        def clangPrefix = "${arch[1]}${platformVersion}"
+        def arPrefix = arch[2]
+        def rustTriple = arch[3]
+        def sysroot = arch[4]
+        def sysrootDir = "${android.ndkDirectory}/platforms/android-${platformVersion}/${sysroot}"
+        def buildDir = "${rootDir}/../build/flutter_wasm/intermediates/stripped_native_libs/debug/out/lib/${abi}/"
+        def outDir = "${thisDir}/src/main/jniLibs/${abi}/"
+
+        tasks.register("build-wasm-lib-${abi}") {
+            // Specify inputs and outputs so that incremental build works properly.
+            inputs.property('platformVersion', platformVersion)
+            inputs.property('abi', abi)
+            outputs.file("${buildDir}/libwasmer.so")
+
+            dependsOn('wasm-pub-get')
+
+            doLast {
+                exec {
+                    workingDir '..'
+                    commandLine "${flutterDir}/bin/flutter", 'pub', 'run', 'wasm:setup',
+                            '--sysroot', sysrootDir,
+                            '--target', rustTriple,
+                            '--clang', "${ndkBinDir}/${clangPrefix}-clang",
+                            '--clangpp', "${ndkBinDir}/${clangPrefix}-clang++",
+                            '--ar', "${ndkBinDir}/${arPrefix}-ar",
+                            '-o', buildDir
+                }
+            }
+        }
+
+        tasks.register("wasm-lib-${abi}", Copy) {
+            from "${buildDir}/libwasmer.so"
+            into outDir
+            dependsOn("build-wasm-lib-${abi}")
+        }
+    }
+
+    tasks.withType(JavaCompile) { compileTask ->
+        for (arch in architectures) {
+            def abi = arch[0]
+            compileTask.dependsOn("wasm-lib-${abi}")
         }
     }
 }
